@@ -1,10 +1,46 @@
+from __future__ import annotations
+
 import os
 import bisect
 import warnings
+from dataclasses import dataclass
 import xml.etree.ElementTree as ET
+from typing import Callable, Any, cast
 
 import pygame
 import pygame.freetype as ft
+
+class TypeSpecializable:
+    OBJECT_TYPES = None
+    BASE = None
+    STRICT = False
+
+    def __init_subclass__(cls, tiled_class=None, base=False, attrib=None, strict=None, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if base:
+            cls.OBJECT_TYPES = {}
+            cls.BASE = cls
+            cls.TMX_BASE = [i for i in cls.__bases__ if issubclass(i, Data)][0]
+            if attrib:
+                cls.ATTRIB = attrib
+            if strict:
+                cls.STRICT = strict
+            if cls.__mro__.index(TypeSpecializable) > cls.__mro__.index(cls.TMX_BASE):
+                raise TypeError("TypeSpecializable must be resolved before tmx.Data subclass")
+        if tiled_class is not None:
+            cls.TILED_CLASS = tiled_class
+            cls.OBJECT_TYPES[tiled_class] = cls  # pylint: disable=unsupported-assignment-operation
+
+    @classmethod
+    def _from_et(cls, et, path, parent, loader, loaded_memo):
+        # pylint: disable=protected-access,unsubscriptable-object,unnecessary-dunder-call,unsupported-membership-test
+        # i don't know whether super(...) allows you to explore bases in a mixin and i was too sleepy to find out when writing tihs
+        if cls is cls.BASE:
+            stype = et.attrib.get(cls.ATTRIB)
+            if stype is None or stype not in cls.OBJECT_TYPES:
+                return cls.TMX_BASE._from_et.__get__(cls, cls)(et, path, parent, loader, loaded_memo)
+            return cls.OBJECT_TYPES[stype]._from_et(et, path, parent, loader, loaded_memo)
+        return cls.TMX_BASE._from_et.__get__(cls, cls)(et, path, parent, loader, loaded_memo)
 
 class BaseLoader:
     _TAG_PARSERS = {}
@@ -29,7 +65,6 @@ class BaseLoader:
 
     def load_font(self, family, size):
         font = ft.SysFont(family, size, bold=True)
-        # Simulate mkxp rendering behavior
         font.strength = 0
         font.antialiased = False
         return font
@@ -55,24 +90,49 @@ class BaseLoader:
             cls._TAG_PARSERS = {}
         cls._STRICT = strict
 
+@dataclass
+class coerce_custom[T]:  # pylint: disable=invalid-name
+    func: Callable[[Any], T]
+    _name: str | None = None
+
+    def __set_name__(self, _owner, name):
+        self._name = name
+
+    def __get__(self, obj: Any, _objtype: Any = None) -> T:
+        return self.func(getattr(obj, "_" + self._name))
+
+    def __set__(self, obj: Any, value: Any) -> None:
+        setattr(obj, "_" + self._name, self.func(value))
+
 class Data:
 
-    def __getattr__(self, obj):
-        # make pylint shut up
-        raise AttributeError(obj)
+    # def __getattr__(self, obj):
+        # pylint will complain about all the dynamic attribute assignment without this
+        # raise AttributeError(obj)
 
     def __init_subclass__(cls, *args, **kwargs):
+        # if you're making classes out of untrusted input, that's your problem
+        # pylint: disable=eval-used
         if "tag" in kwargs:
             cls._TAG = kwargs["tag"]
-        if "types" in kwargs:
-            cls._TYPES = kwargs["types"]
+        annotations = {}
+        for k in cls.__annotations__.keys():
+            v = cls.__dict__.get(k, None)
+            if not isinstance(v, coerce_custom):
+                # don't coerce by default
+                v = coerce_custom(lambda x: x)
+            annotations[k] = v
+        if hasattr(cls, "_TYPES"):
+            cls._TYPES.update(annotations)
+        else:
+            cls._TYPES = annotations
 
     @classmethod
     def _from_et(cls, et, path, _parent, loader, loaded_memo):
         # pylint: disable=attribute-defined-outside-init
         obj = cls()
-        types = getattr(cls, "_TYPES", {})
-        obj.__dict__.update({k: types.get(k, lambda x: x)(v) for k, v in et.attrib.items()})
+        for k, v in et.attrib.items():
+            setattr(obj, k, v)
         obj.data_children = [loader.load_internal(i, path, obj, loaded_memo) for i in et]
         loaded_memo.append(obj)
         return obj
@@ -95,10 +155,15 @@ class TileCollection:
         return tileset[gid - tileset.firstgid]
 
 @BaseLoader.register
-class Map(Data, tag="map", types={
-    "width": int, "height": int, "tilewidth": int, "tileheight": int,
-    "infinite": (lambda x: bool(int(x))), "nextlayerid": int, "nextobjectid": int
-}):
+class Map(TypeSpecializable, Data, tag="map", base=True, attrib="class"):
+    width: int
+    height: int
+    tilewidth: int
+    tileheight: int
+    infinite: int = coerce_custom(lambda x: bool(int(x)))
+    nextlayerid: int
+    nextobjectid: int
+    source: str
 
     def __repr__(self):
         return f"<Map {os.path.basename(self.source)!r} {self.width}x{self.height}>"
@@ -110,14 +175,20 @@ class Map(Data, tag="map", types={
         obj.source = path
         obj.tilesets = [i for i in obj.data_children if isinstance(i, Tileset)]
         obj.tiles = TileCollection(obj.tilesets)
-        obj.layers = [i for i in obj.data_children if isinstance(i, (Layer, ObjectGroup, ImageLayer))]
+        obj.layers = [i for i in obj.data_children if isinstance(i, (TileLayer, ObjectGroup, ImageLayer))]
         obj.imgs = [i.img for i in obj.tilesets if i.img is not None]
         obj.imgs.extend([j.img for i in obj.layers if isinstance(i, ObjectGroup) for j in i.objects if j.has_image and j.img is not None])
         obj.imgs.extend([i.img for i in obj.layers if isinstance(i, ImageLayer)])
         return obj
 
 @BaseLoader.register
-class Tileset(Data, tag="tileset", types={"tilewidth": int, "tileheight": int, "tilecount": int, "columns": int, "firstgid": int}):
+class Tileset(Data, tag="tileset"):
+    tilewidth: int
+    tileheight: int
+    tilecount: int
+    columns: int
+    firstgid: int
+    tiledata: dict[int, Tile]
 
     def __repr__(self):
         return f"<Tileset #{self.firstgid}-#{self.firstgid + self.tilecount} (tile size {self.tilewidth}x{self.tileheight})>"
@@ -148,21 +219,28 @@ class Tileset(Data, tag="tileset", types={"tilewidth": int, "tileheight": int, "
         return Tile(self, tileid, None)
 
 @BaseLoader.register
-class Grid(Data, tag="grid", types={"width": int, "height": int}):
-    pass
+class Grid(Data, tag="grid"):
+    width: int
+    height: int
 
 @BaseLoader.register
-class Text(Data, tag="text", types={"pixelsize": int, "wrap": (lambda x: bool(int(x)))}):
+class Text(Data, tag="text"):
+    fontfamily: str
+    pixelsize: int
+    wrap: int = coerce_custom(lambda x: bool(int(x)))
 
     @classmethod
     def _from_et(cls, et, path, parent, loader, loaded_memo):
         obj = super()._from_et(et, path, parent, loader, loaded_memo)
-        obj.font = loader.load_font(obj.fontfamily, obj.pixelsize)
+        obj.font = loader.load_font(obj.fontfamily, obj.pixelsize)  # pylint: disable=no-member
         obj.text = et.text
         return obj
 
 @BaseLoader.register
-class Image(Data, tag="image", types={"width": int, "height": int}):
+class Image(Data, tag="image"):
+    width: int
+    height: int
+    source: str
 
     def __repr__(self):
         return f"<Image {os.path.basename(self.source)!r} ({self.width}x{self.height})>"
@@ -176,6 +254,9 @@ class Image(Data, tag="image", types={"width": int, "height": int}):
 
 @BaseLoader.register
 class Tile(Data, tag="tile"):
+    tileset: Tileset
+    properties: dict[str, Any] | None = coerce_custom(lambda x: x)
+    id: int
 
     def __repr__(self):
         props = "" if self.properties is None else f" (properties {self.properties})"
@@ -250,7 +331,7 @@ class Properties(Data, dict, tag="properties"):
     def _from_et(cls, et, path, parent, loader, loaded_memo):
         obj = super()._from_et(et, path, parent, loader, loaded_memo)
         for i in obj.data_children:
-            obj[i.key] = i.value
+            obj[i.key] = i.value  # pylint: disable=unsupported-assignment-operation
         del obj.data_children
         return obj
 
@@ -304,8 +385,19 @@ class Property(Data, tag="property"):
         obj.value = value
         return obj
 
+class LayerBase(Data):
+    # For isinstance
+    pass
+
 @BaseLoader.register
-class Layer(Data, tag="layer", types={"id": int, "width": int, "height": int, "offsetx": float, "offsety": float}):
+class TileLayer(TypeSpecializable, LayerBase, tag="layer", base=True, attrib="class"):
+    id: int
+    width: int
+    height: int
+    offsetx: float
+    offsety: float
+    data: LayerData
+    map: Map
 
     def __repr__(self):
         return f"<Layer {self.width}x{self.height}>"
@@ -329,30 +421,32 @@ class Layer(Data, tag="layer", types={"id": int, "width": int, "height": int, "o
             yield (i % self.width, i // self.width, self.map.tiles[gid])
 
 @BaseLoader.register
-class LayerData(Data, list, tag="data"):
+class ImageLayer(TypeSpecializable, LayerBase, tag="imagelayer", base=True, attrib="class"):
+    id: int
+    offsetx: float
+    offsety: float
+    img: Image | None
 
-    def __init__(self, data, width, height):
-        self.extend(data)
-        self.width = width
-        self.height = height
+    def __repr__(self):
+        return f"<ImageLayer {self.img!r}>"
 
     @classmethod
-    def _from_et(cls, et, _path, parent, _loader, loaded_memo):
-        obj = cls([int(i.strip()) for i in et.text.strip().replace("\n", "").split(",") if i is not None], parent.width, parent.height)
+    def _from_et(cls, et, path, parent, loader, loaded_memo):
+        obj = super()._from_et(et, path, parent, loader, loaded_memo)
+        obj.map = parent
+        obj.type = getattr(obj, "class")
+        delattr(obj, "class")
+        obj.img = [i for i in obj.data_children if isinstance(i, Image)][0]
+        if not hasattr(obj, "offsetx"):
+            obj.offsetx = 0.0
+        if not hasattr(obj, "offsety"):
+            obj.offsety = 0.0
         return obj
 
-    def __setitem__(self, *args):
-        raise NotImplementedError
-
-    def __getitem__(self, idx):
-        if isinstance(idx, tuple):
-            if len(idx) != 2:
-                raise TypeError("can only index layer data with 2 coordinates or an index")
-            return super().__getitem__(idx[1] * self.width + idx[0])
-        return super().__getitem__(idx)
-
 @BaseLoader.register
-class ObjectGroup(Data, tag="objectgroup", types={"id": int}):
+class ObjectGroup(TypeSpecializable, LayerBase, tag="objectgroup", base=True, attrib="class"):
+    id: int
+    objects: list[Object]
 
     def __repr__(self):
         return f"<ObjectGroup {self.objects}>"
@@ -374,7 +468,17 @@ class ObjectGroup(Data, tag="objectgroup", types={"id": int}):
         return obj
 
 @BaseLoader.register
-class Object(Data, tag="object", types={"id": int, "x": float, "y": float, "width": float, "height": float, "gid": int}):
+class Object(TypeSpecializable, Data, tag="object", base=True, attrib="type"):
+    id: int
+    name: str | None
+    x: float
+    y: float
+    width: float
+    height: float
+    gid: int | None
+    text: Text | None
+    img: Image | None
+    type: str
 
     def __repr__(self):
         return f"<Object {self.name!r} (type {self.type})>"
@@ -409,17 +513,31 @@ class Object(Data, tag="object", types={"id": int, "x": float, "y": float, "widt
             raise TypeError("not a tile object") from None
 
 @BaseLoader.register
-class ImageLayer(Data, tag="imagelayer", types={"id": int, "offsetx": float, "offsety": float}):
+class LayerData(Data, list, tag="data"):
+    width: int
+    height: int
+
+    def __init__(self, data, width, height):
+        self.extend(data)
+        self.width = width
+        self.height = height
 
     @classmethod
-    def _from_et(cls, et, path, parent, loader, loaded_memo):
-        obj = super()._from_et(et, path, parent, loader, loaded_memo)
-        obj.map = parent
-        obj.type = getattr(obj, "class")
-        delattr(obj, "class")
-        obj.img = [i for i in obj.data_children if isinstance(i, Image)][0]
-        if not hasattr(obj, "offsetx"):
-            obj.offsetx = 0.0
-        if not hasattr(obj, "offsety"):
-            obj.offsety = 0.0
+    def _from_et(cls, et, _path, parent, _loader, loaded_memo):
+        obj = cls([int(i.strip()) for i in et.text.strip().replace("\n", "").split(",") if i is not None], parent.width, parent.height)
         return obj
+
+    def __setitem__(self, *args):
+        raise NotImplementedError
+
+    def __getitem__(self, idx):
+        if isinstance(idx, tuple):
+            if len(idx) != 2:
+                raise TypeError("can only index layer data with 2 coordinates or an index")
+            return super().__getitem__(idx[1] * self.width + idx[0])
+        return super().__getitem__(idx)
+
+if __name__ == "__main__":
+    pygame.init()
+    tmap = BaseLoader(False).load("/home/gwitr/Dokumenty/tiled/help/test map.tmx")
+    print(tmap.layers)
