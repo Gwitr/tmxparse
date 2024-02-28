@@ -19,9 +19,9 @@ The module allows the map's structure to be easily traversed:
 [<Layer 52x46>, <Layer 52x46>, <ObjectGroup [<Object 'player' (type player)>, <Object None (type enemy)>]>, <Layer 52x46>, <ObjectGroup [<Object None (type warp)>, <Object None (type warp)>, <Object None (type warp)>, <Object None (type warp)>]>, <ImageLayer <Image 'overlay.png' (640x480)>>]
 >>> tmap.tilewidth, tmap.tileheight
 (32, 32)
->>> tmap.layers[0][10,15]
+>>> tmap.layers[0].data[10,15]
 41
->>> tmap.tiles[tmap.layers[0][10,15]]
+>>> tmap.tiles[tmap.layers[0].data[10,15]]
 <Tile #41 (properties {'wall': True})>
 >>> tmap.layers[2].objects[0].x
 568.0
