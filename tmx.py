@@ -267,6 +267,7 @@ class Image(Data, tag="image"):
     width: int = coerce(int)
     height: int = coerce(int)
     source: str
+    surface: Any
 
     def __repr__(self):
         return f"<Image {os.path.basename(self.source)!r} ({self.width}x{self.height})>"

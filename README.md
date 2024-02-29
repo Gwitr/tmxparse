@@ -1,6 +1,6 @@
 # tmxparse
 
-A Python 3.12+ library for parsing TMX files. Has support for specialization based on the type selected in-editor (e.g. allowing you to quickly and easily create custom object logic). It's in its very early stages so far, but it's getting there
+A Python 3.12+ library for parsing Tiled editor's TMX files. Has support for specialization based on the type selected in-editor (e.g. allowing you to quickly and easily create custom object logic). It's in its very early stages so far, but it's getting there
 
 ## Basic usage
 You can use tmxparse.BaseLoader to open a map file:
