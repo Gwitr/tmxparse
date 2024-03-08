@@ -34,7 +34,8 @@ class PygameLoader(tmx.BaseLoader):
         if _NO_DIRECT_INHERIT and union:
             # FIXME: Make this hack unnecessary
             base = next(iter(union)).__name__
-            raise TypeError(f"Please inherit from tmxparse.pg_compat.{base} instead of from tmxparse.{base} when using PygameLoader")
+            raise TypeError(f"Please inherit from tmxparse.pg_compat.{base} instead of "
+                f"from tmxparse.{base} when using PygameLoader")
         return super().register(cls2)
 
 class TileCollection(tmx.TileCollection):
@@ -71,12 +72,7 @@ class Map(tmx.Map):
 
     tiles: TileCollection
 
-    @classmethod
-    def _from_et(cls, et: ET.Element, path: str, parent: tmx.Data | None, loader: tmx.BaseLoader,
-                 loaded_memo: list[tmx.Data]) -> tmx.Data:
-        # pylint: disable=attribute-defined-outside-init
-        obj = super()._from_et(et, path, parent, loader, loaded_memo)
-        obj.tiles = TileCollection(obj.tilesets)
-        return obj
+    def load_xml(self, _loader: PygameLoader, _element: ET.Element) -> None:
+        self.tiles = TileCollection(self.tilesets)
 
 _NO_DIRECT_INHERIT = True
