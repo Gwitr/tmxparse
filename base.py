@@ -191,6 +191,7 @@ class dfield[T]:  # pylint: disable=invalid-name
         self.true_name = f"_dfield_{name}"
 
     def type_info(self):
+        """figure out type info for this attribute"""
         # pylint: disable=eval-used
         if self.loader:
             return None, None, None
@@ -226,6 +227,7 @@ class dfield[T]:  # pylint: disable=invalid-name
         return delattr(obj, self.true_name)
 
     def load_json_element(self, instance, element, path, _parent, loader, loaded_memo):
+        """load this attribute from an object representing parsed json data"""
         # pylint: disable=unnecessary-dunder-call,protected-access,unnecessary-lambda-assignment
         if self.loader is not None:
             return self.__set__(instance, self.loader(instance, loader))
@@ -255,6 +257,7 @@ class dfield[T]:  # pylint: disable=invalid-name
         return self.__set__(instance, load(annotation, src))
 
     def load_xml_element(self, instance: Data, loader: BaseLoader, element: ET.Element) -> None:
+        """load this attribute from an xml element"""
         # pylint: disable=eval-used,unnecessary-dunder-call
         if self.loader is not None:
             return self.__set__(instance, self.loader(instance, loader))
