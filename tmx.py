@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import types
 import bisect
 import warnings
@@ -39,8 +40,8 @@ class TypeSpecializable:
     @classmethod
     def _load(cls, data_obj, path: str, parent: Data | None, loader: BaseLoader,
               loaded_memo: list[Data]) -> Data:
+        # pylint: disable=no-member,unsubscriptable-object,protected-access
         if isinstance(data_obj, ET.Element):
-            # pylint: disable=no-member,unsubscriptable-object,protected-access
             if cls is cls.OBJECT_BASE:
                 stype = data_obj.attrib.get(cls.ATTRIB)
                 if stype is None or stype not in cls.OBJECT_TYPES:  # pylint: disable=unsupported-membership-test
@@ -49,19 +50,30 @@ class TypeSpecializable:
                 return cls.OBJECT_TYPES[stype]._load(data_obj, path, parent, loader, loaded_memo)
             return super(TypeSpecializable, cls)._load(data_obj, path, parent, loader, loaded_memo)
         else:
-            raise NotImplementedError("Loading from JSON")
+            if cls is cls.OBJECT_BASE:
+                stype = data_obj.get(cls.ATTRIB)
+                if stype is None or stype not in cls.OBJECT_TYPES:  # pylint: disable=unsupported-membership-test
+                    return super(TypeSpecializable, cls)._load(
+                        data_obj, path, parent, loader, loaded_memo)
+                return cls.OBJECT_TYPES[stype]._load(data_obj, path, parent, loader, loaded_memo)
+            return super(TypeSpecializable, cls)._load(data_obj, path, parent, loader, loaded_memo)
 
 class BaseLoader:
     """The base loader class. If you want to use your own data classes, you'll need to inherit from
     this type, and register them under the child class."""
 
-    _TAG_PARSERS = {}
+    TAG_PARSERS = {}
     _STRICT = False
 
     def load(self, path: str):
         """Load a TMX file present at the given path"""
         loaded_memo = []
-        result = self.load_internal(ET.parse(path).getroot(), path, None, loaded_memo)
+        if path.lower().endswith((".tmx", ".xml")):
+            result = self.load_xml(ET.parse(path).getroot(), path, None, loaded_memo)
+        else:
+            with open(path, "r", encoding="utf-8") as f:
+                # element, path, parent, loader, loaded_memo
+                result = self.TAG_PARSERS["map"]._load(json.loads(f.read()), path, None, self, loaded_memo)
         for obj in loaded_memo:
             obj.post_load()
         return result
@@ -74,27 +86,27 @@ class BaseLoader:
         """Load a font of a given family and size. Invoked by the loader when loading text"""
         return None
 
-    def load_internal(self, et: ET.Element, path: str, parent: Data | None,
+    def load_xml(self, et: ET.Element, path: str, parent: Data | None,
                       loaded_memo: list[Data]) -> Data:
         """Load the correct Data subclass for a given Element and loading metadata"""
-        if et.tag not in self._TAG_PARSERS:
+        if et.tag not in self.TAG_PARSERS:
             if self._STRICT:
                 raise ValueError(f"unknown tag {et.tag}")
-        cls2 = self._TAG_PARSERS.get(et.tag, Data)
+        cls2 = self.TAG_PARSERS.get(et.tag, Data)
         return cls2._load(et, path, parent, self, loaded_memo)  # pylint: disable=protected-access
 
     @classmethod
     def register(cls, cls2: Type[Data]) -> Type[Data]:
         """Attach a Data subclass to this loader. Use this when creating custom loaders"""
-        cls._TAG_PARSERS[cls2.TAG] = cls2  # pylint: disable=protected-access
+        cls.TAG_PARSERS[cls2.TAG] = cls2  # pylint: disable=protected-access
         return cls2
 
     def __init_subclass__(cls, *args, strict=False, use_defaults=True, **kwargs):
         super().__init_subclass__(*args, **kwargs)
         if use_defaults:
-            cls._TAG_PARSERS = cls._TAG_PARSERS.copy()
+            cls.TAG_PARSERS = cls.TAG_PARSERS.copy()
         else:
-            cls._TAG_PARSERS = {}
+            cls.TAG_PARSERS = {}
         cls._STRICT = strict
 
 def coerce(to_type, value):
@@ -110,18 +122,18 @@ def coerce(to_type, value):
     return to_type(value)
 
 def base_annotation_type(annotation):
-    """fetch type from annotations of the form X, X | None, list[X], list[X | None]"""
+    """fetch type from annotations of the form X, X | None, list[X], list[X] | None"""
 
-    if get_origin(annotation) is list:
-        annotation = get_args(annotation)[0]
-    if get_origin(annotation) is list:
-        raise ValueError("nested list")
     if get_origin(annotation) in (Union, types.UnionType):
         possible_types = list(get_args(annotation))
         if len(possible_types) != 2 or type(None) not in possible_types:
             raise ValueError("union isn't type")
         possible_types.remove(type(None))
         annotation = possible_types[0]
+    if get_origin(annotation) is list:
+        annotation = get_args(annotation)[0]
+    if get_origin(annotation) is list:
+        raise ValueError("nested list")
     if get_origin(annotation) is not None:
         raise ValueError(f"{annotation} isn't type")
     return annotation
@@ -144,20 +156,26 @@ class alias[T]:  # pylint: disable=invalid-name
 class dfield[T]:  # pylint: disable=invalid-name
     """Descriptor that describes a data field in a Tiled element"""
 
-    rename_from: str | None
-    loader: Callable[[Any], T] | None
     xml_child_list: bool
     xml_child: bool
     xml_text: bool
+
+    json_use_parent_obj: bool
+    json_rename_from: str | None
+
     optional: bool
+    default: Any
+    loader: Callable[[Any], T] | None
+    rename_from: str | None
+
     owner: type[Any] | None
     name: str | None
     true_name: str | None
-    default: Any
 
     def __init__(self, rename_from: str | None = None, loader: Callable[[Any], T] | None = None,
                        xml_child_list: bool = False, xml_text: bool = False,
-                       xml_child: bool = False, optional: bool = False, default: Any = None):
+                       xml_child: bool = False, optional: bool = False, default: Any = None,
+                       json_use_parent_obj: bool | None = None, json_rename_from: str | None = None):
         if (loader is not None, bool(xml_child_list), bool(xml_text)).count(True) > 1:
             raise ValueError(
                 "Only one of loader, xml_child_list, or xml_text can be set at one time")
@@ -167,6 +185,8 @@ class dfield[T]:  # pylint: disable=invalid-name
         self.xml_child_list = bool(xml_child_list)
         self.xml_child = bool(xml_child)
         self.xml_text = bool(xml_text)
+        self.json_use_parent_obj = bool(json_use_parent_obj)
+        self.json_rename_from = json_rename_from
         self.optional = bool(optional)
         self.default = default
         self.owner = None
@@ -188,6 +208,91 @@ class dfield[T]:  # pylint: disable=invalid-name
 
     def __delete__(self, obj) -> None:
         return delattr(obj, self.true_name)
+
+    def generate_json_load_code(self):
+        # pylint: disable=line-too-long
+        """Generates a piece of code to slide into the _load_json for this class"""
+        typename = self.owner.__annotations__[self.name]
+        annotation = eval(typename, globals(), globals())
+        is_list = False
+        optional = False
+        if get_origin(annotation) in (Union, types.UnionType):
+            optional = True
+            possible_types = list(get_args(annotation))
+            if len(possible_types) != 2 or type(None) not in possible_types:
+                raise ValueError("union isn't type")
+            possible_types.remove(type(None))
+            annotation = possible_types[0]
+        if get_origin(annotation) is list:
+            is_list = True
+            annotation = get_args(annotation)[0]
+        if annotation is None:
+            annotation = type(None)
+        typename = annotation.__name__
+        if issubclass(annotation, Data) and hasattr(annotation, "TAG"):
+            typename = f"loader.TAG_PARSERS[{annotation.TAG!r}]"
+
+        result = ""
+        if self.loader is not None:
+            result += f"obj_{self.name} = self.__class__.{self.name}.loader(self, loader)\n"
+            result += f"if obj_{self.name} is not NotImplemented:\n"
+            result += f"    self.{self.name} = obj_{self.name}\n"
+        else:
+            if self.json_rename_from is not None:
+                src_name = self.json_rename_from
+            elif self.rename_from is not None:
+                src_name = self.rename_from
+            else:
+                src_name = self.name
+            if self.optional or optional:
+                result += f"if {src_name!r} in element: "
+            src = "element" if self.json_use_parent_obj else f"element[{src_name!r}]"
+            if is_list:
+                if issubclass(annotation, Data):
+                    result += f"self.{self.name} = [{typename}._load(i, path, self, loader, loaded_memo) for i in {src}]\n"
+                else:
+                    result += f"self.{self.name} = [{typename}(i) for i in {src}]\n"
+            else:
+                if issubclass(annotation, Data):
+                    result += f"self.{self.name} = {typename}._load({src}, path, self, loader, loaded_memo)\n"
+                else:
+                    result += f"self.{self.name} = {typename}({src})\n"
+            if self.optional or optional:
+                result += f"else: self.{self.name} = self.__class__.{self.name}.default\n"
+
+        return result
+
+    def load_xml_element(self, instance: Data, loader: BaseLoader, element: ET.Element) -> None:
+        # pylint: disable=eval-used,unnecessary-dunder-call
+        annotation = eval(self.owner.__annotations__[self.name], globals(), globals())
+        isinstance_types = base_annotation_type(annotation).collect_subclasses()
+
+        if self.loader is not None:
+            return self.__set__(instance, self.loader(instance, loader))
+
+        if self.xml_text:
+            return self.__set__(instance, element.text)
+
+        if self.xml_child:
+            children = [i for i in instance.data_children if isinstance(i, isinstance_types)]
+            try:
+                return self.__set__(instance, children[0])
+            except IndexError:
+                if self.optional:
+                    return self.default
+                raise ValueError(f"required attribute {self.name} not found") from None
+
+        if self.xml_child_list:
+            return self.__set__(instance, [i for i in instance.data_children if isinstance(i, isinstance_types)])
+
+        try:
+            return self.__set__(instance, coerce(annotation,
+                element.attrib[self.rename_from if self.rename_from is not None else self.name]
+            ))
+        except KeyError:
+            if self.optional:
+                return self.default
+            raise ValueError(f"required attribute {self.name} not found") from None
 
     def generate_xml_load_code(self):
         # pylint: disable=line-too-long
@@ -239,6 +344,7 @@ class Data:
     MAYBE_REMOTE: ClassVar[bool] = False
     CODE: ClassVar[str]
     XML_IGNORE: ClassVar[list[str]]
+    _TO_INIT: ClassVar[list[type[Data]]] = []
 
     source: str | None
     parent: Data
@@ -272,8 +378,15 @@ class Data:
                 cls.XML_IGNORE = []
             cls.XML_IGNORE.extend(xml_child_ignore)
         if data_base:
-            code_start = ""
-            code_end = ""
+            cls._TO_INIT.append(cls)
+
+    @staticmethod
+    def _init_subclasses():
+        for cls in Data._TO_INIT:
+            xml_code_start = ""
+            xml_code_end = ""
+            json_code_start = ""
+            json_code_end = ""
             for name in cls.__annotations__:
                 # NOTE: `ClassVar`s have no special handling
                 if name not in cls.__dict__:
@@ -283,15 +396,31 @@ class Data:
                     continue
                 code = descriptor.generate_xml_load_code()
                 if descriptor.loader is None:
-                    code_start += code
+                    xml_code_start += code
                 else:
-                    code_end += code
-            code_end += "self.load_xml(loader, element)\n"
-            code = f"def _load_xml(self, loader, element):\n{code_start}{code_end}"
-            code = code.replace("\n", "\n    ")
-            exec(code, globals(), globals())
+                    xml_code_end += code
+                code = descriptor.generate_json_load_code()
+                if descriptor.loader is None:
+                    json_code_start += code
+                else:
+                    json_code_end += code
+            xml_code_end += "self.load_xml(loader, element)\n"
+            json_code_end += "self.load_json(element, path, parent, loader, loaded_memo)\n"
+
+            xml_code = f"def _load_xml(self, loader, element):\n{xml_code_start}{xml_code_end}"
+            xml_code = xml_code.replace("\n", "\n    ")
+            exec(xml_code, globals(), globals())
             cls._load_xml = globals()["_load_xml"]
             del globals()["_load_xml"]
+
+            json_code = f"def _load_json(self, element, path, parent, loader, loaded_memo):\n{json_code_start}{json_code_end}"
+            json_code = json_code.replace("\n", "\n    ")
+            exec(json_code, globals(), globals())
+            cls._load_json = globals()["_load_json"]
+            cls.JSON_CODE = json_code
+            del globals()["_load_json"]
+
+        del Data._TO_INIT
 
     @classmethod
     def _load(cls, data_obj, path: str, parent: Data | None, loader: BaseLoader,
@@ -306,11 +435,21 @@ class Data:
                     for k, v in data_obj.attrib.items():
                         rsrc.attrib[k] = v
                     del rsrc.attrib["source"]
-                    obj = loader.load_internal(rsrc, rsrc_path, parent, loaded_memo)
+                    obj = loader.load_xml(rsrc, rsrc_path, parent, loaded_memo)
                     obj.source = src
                     return obj
             else:
-                raise NotImplementedError("Loading from JSON")
+                if isinstance(data_obj, dict) and "source" in data_obj:
+                    src = data_obj["source"]
+                    rsrc_path = os.path.join(os.path.dirname(path), src)
+                    with open(rsrc_path, "r", encoding="utf-8") as f:
+                        rsrc = json.loads(f.read())
+                    for k, v in data_obj.items():
+                        rsrc[k] = v
+                    del rsrc["source"]
+                    obj = cls._load(rsrc, rsrc_path, parent, loader, loaded_memo)
+                    obj.source = src
+                    return obj
 
         obj = cls()
         obj.parent = parent
@@ -321,22 +460,31 @@ class Data:
         if isinstance(data_obj, ET.Element):
             if hasattr(cls, "XML_IGNORE"):
                 obj.data_children = [
-                    loader.load_internal(i, path, obj, loaded_memo) for i in data_obj
+                    loader.load_xml(i, path, obj, loaded_memo) for i in data_obj
                     if i.tag not in cls.XML_IGNORE]
             else:
                 obj.data_children = [
-                    loader.load_internal(i, path, obj, loaded_memo) for i in data_obj]
+                    loader.load_xml(i, path, obj, loaded_memo) for i in data_obj]
             obj._load_xml(loader, data_obj)  # pylint: disable=protected-access
         else:
             obj.data_children = None
-            raise NotImplementedError("Loading from JSON")
+            print(cls.__name__, parent.__class__.__name__, data_obj)
+            if hasattr(obj, "JSON_CODE"):
+                print(obj.JSON_CODE)
+            obj._load_json(data_obj, path, parent, loader, loaded_memo)  # pylint: disable=protected-access
         loaded_memo.append(obj)
         return obj
 
     def _load_xml(self, _loader: BaseLoader, element: ET.Element) -> None:
         warnings.warn(UserWarning(f"unknown tag {element.tag}"))
 
+    def _load_json(self, _loader: BaseLoader, element: ET.Element) -> None:
+        raise RuntimeError(f"_load_json not defined on loaded Data subclass {self.__class__.__name__}")
+
     def load_xml(self, _loader: BaseLoader, _element: ET.Element) -> None:
+        """Dummy method"""
+
+    def load_json(self, _element: Any, path: str, parent: Data | None, loader: BaseLoader, loaded_memo: list[Data]) -> None:
         """Dummy method"""
 
     def post_load(self):
@@ -345,14 +493,16 @@ class Data:
 class TileCollection:
     """A helper class that lets you fetch a tile by its GID"""
 
+    tile_cls: type[Tile]
     tilesets: list[Tileset]
 
-    def __init__(self, tilesets: list[Tileset]):
+    def __init__(self, tile_cls: type[Tile], tilesets: list[Tileset]):
+        self.tile_cls = tile_cls
         self.tilesets = sorted(tilesets, key=lambda x: x.firstgid)
 
     def __getitem__(self, gid: int) -> Tile:
         if gid == 0:
-            return Tile(None, 0, None)
+            return self.tile_cls(None, 0, None)
         tileset_idx = bisect.bisect_left(self.tilesets, gid, key=lambda x: x.firstgid)
         if len(self.tilesets) == tileset_idx or self.tilesets[tileset_idx].firstgid != gid:
             tileset_idx -= 1
@@ -380,7 +530,7 @@ class Map(TypeSpecializable, Data, tag="map", maybe_remote=True, data_base=True,
         [i.img for i in obj.tilesets if i.img is not None] +
         [i.img for i in obj.layers if isinstance(i, ImageLayer)]
     ))
-    tiles: TileCollection = dfield(loader=lambda obj, _loader: TileCollection(obj.tilesets))
+    tiles: TileCollection = dfield(loader=lambda obj, loader: TileCollection(loader.TAG_PARSERS["tile"], obj.tilesets))
 
     def __repr__(self):
         return f"<Map {os.path.basename(self.source)!r} {self.width}x{self.height}>"
@@ -389,14 +539,16 @@ class Map(TypeSpecializable, Data, tag="map", maybe_remote=True, data_base=True,
 class Tileset(Data, tag="tileset", maybe_remote=True, data_base=True):
     """A TMX tileset"""
 
+    tile_cls: type[Tile] = dfield(loader=lambda _obj, loader: loader.TAG_PARSERS["tile"])
+
     tilewidth: int = dfield()
     tileheight: int = dfield()
     tilecount: int = dfield()
     columns: int = dfield()
     firstgid: int = dfield()
-    img: Image | None = dfield(xml_child=True, rename_from="image")
+    img: Image | None = dfield(xml_child=True, rename_from="image", json_use_parent_obj=True)
 
-    _tiles: list[Tile] = dfield(xml_child_list=True, rename_from="tiles")
+    _tiles: list[Tile] | None = dfield(xml_child_list=True, rename_from="tiles", optional=True, default=[])
     tiledata: dict[int, Tile] = dfield(loader=lambda obj, _loader: {i.id: i for i in obj._tiles})  # pylint: disable=protected-access
 
     map: Map = alias("parent")
@@ -412,7 +564,7 @@ class Tileset(Data, tag="tileset", maybe_remote=True, data_base=True):
             raise IndexError(f"no tile #{tileid}")
         if tileid in self.tiledata:
             return self.tiledata[tileid]
-        return Tile(self, tileid, None)
+        return self.tile_cls(self, tileid, None)
 
 @BaseLoader.register
 class Grid(Data, tag="grid", data_base=True):
@@ -435,9 +587,9 @@ class Text(Data, tag="text", data_base=True):
 @BaseLoader.register
 class Image(Data, tag="image", data_base=True):
     """A TMX image element"""
-    width: int = dfield()
-    height: int = dfield()
-    source: str | None = dfield(optional=True)
+    width: int | None = dfield(json_rename_from="imagewidth")
+    height: int | None = dfield(json_rename_from="imageheight")
+    source: str | None = dfield(optional=True, json_rename_from="image")
     surface: Any = dfield(loader=lambda obj, loader: loader.load_image(
         os.path.join(os.path.dirname(obj.data_path), obj.source)))
 
@@ -560,11 +712,20 @@ class Property(Data, tag="property", data_base=True):
 class LayerBase(Data):
     """Base class for all TMX layer types"""
 
+    @classmethod
+    def _load(cls, data_obj, path, parent, loader, loaded_memo):
+        # TODO: Don't hardcode this like that. Maybe reuse TypeSpecializable?
+        if cls is LayerBase and not isinstance(data_obj, ET.Element):
+            if data_obj["type"] == "tilelayer":
+                return loader.TAG_PARSERS["layer"]._load(data_obj, path, parent, loader, loaded_memo)
+            return loader.TAG_PARSERS[data_obj["type"]]._load(data_obj, path, parent, loader, loaded_memo)
+        return super()._load(data_obj, path, parent, loader, loaded_memo)
+
 @BaseLoader.register
-class TileLayer(TypeSpecializable, LayerBase, tag="layer", data_base=True,
-                base=True, attrib="class"):
+class TileLayer(LayerBase, tag="layer", data_base=True):
     """A TMX tile layer"""
 
+    # TODO: Reintroduce TypeSpecializable here (mro magic broke it)
     id: int = dfield()
     map: Map = alias("parent")
     width: int = dfield()
@@ -591,7 +752,7 @@ class ImageLayer(TypeSpecializable, LayerBase, tag="imagelayer", data_base=True,
     type: str | None = dfield(rename_from="class", optional=True)
     offsetx: float = dfield(optional=True, default=0.0)
     offsety: float = dfield(optional=True, default=0.0)
-    img: Image = dfield(xml_child=True)
+    img: Image = dfield(xml_child=True, json_use_parent_obj=True)
 
     def __repr__(self):
         return f"<ImageLayer {self.img!r}>"
@@ -664,6 +825,9 @@ class LayerData(Data, list, tag="data", data_base=True):
         self.width = width
         self.height = height
 
+    def load_json(self, data_obj, path, parent, loader, loaded_memo):
+        self.extend(data_obj)
+
     def load_xml(self, _loader, element):
         self.extend(
             int(i.strip())
@@ -681,3 +845,5 @@ class LayerData(Data, list, tag="data", data_base=True):
                 raise TypeError("can only index layer data with 2 coordinates or an index")
             return super().__getitem__(idx[1] * self.width + idx[0])
         return super().__getitem__(idx)
+
+Data._init_subclasses()
