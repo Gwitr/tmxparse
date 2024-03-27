@@ -155,6 +155,7 @@ class dfield[T]:  # pylint: disable=invalid-name
 
     json_use_parent_obj: bool
     json_rename_from: str | None
+    json_loader: Any
 
     default: Any
     loader: Callable[[Any], T] | None
@@ -168,6 +169,7 @@ class dfield[T]:  # pylint: disable=invalid-name
     def __init__(self, rename_from: str | None = None, loader: Callable[[Any], T] | None = None,
                        xml_text: bool = False, xml_child: bool = False, default: Any = None,
                        json_use_parent_obj: bool | None = None, json_rename_from: str | None = None,
+                       json_loader: Any = None,
                        temporary: bool = False):
         if (loader is not None, bool(xml_text)).count(True) > 1:
             raise ValueError(
@@ -179,6 +181,7 @@ class dfield[T]:  # pylint: disable=invalid-name
         self.xml_text = bool(xml_text)
         self.json_use_parent_obj = bool(json_use_parent_obj)
         self.json_rename_from = json_rename_from
+        self.json_loader = json_loader
         self.default = default
         self.temporary = temporary
 
@@ -232,6 +235,9 @@ class dfield[T]:  # pylint: disable=invalid-name
         if self.loader is not None:
             return self.__set__(instance, self.loader(instance, loader))
 
+        if self.json_loader is not None:
+            return self.__set__(instance, self.json_loader(instance, element, path, _parent, loader, loaded_memo))
+
         annotation, is_list, optional = self.type_info()
         if issubclass(annotation, Data):
             if hasattr(annotation, "TAG"):
@@ -245,7 +251,7 @@ class dfield[T]:  # pylint: disable=invalid-name
         except KeyError:
             if optional:
                 return self.__set__(instance, self.default)
-            raise ValueError(f"required attribute {self.name} not found") from None
+            raise ValueError(f"required attribute {self.name} of {instance.TAG} not found") from None
 
         load = lambda t, x: t._load(x, path, instance, loader, loaded_memo) if issubclass(t, Data) else t(x)
         if is_list:
@@ -281,14 +287,14 @@ class dfield[T]:  # pylint: disable=invalid-name
             except IndexError:
                 if optional:
                     return self.__set__(instance, self.default)
-                raise ValueError(f"required attribute {self.name} not found") from None
+                raise ValueError(f"required attribute {self.name} of {instance.TAG} not found") from None
 
         try:
             return self.__set__(instance, coerce(annotation, element.attrib[self.rename_from if self.rename_from else self.name]))
         except KeyError:
             if optional:
                 return self.__set__(instance, self.default)
-            raise ValueError(f"required attribute {self.name} not found") from None
+            raise ValueError(f"required attribute {self.name} of {instance.TAG} not found") from None
 
 class Data:
     """The base class for every element present in a TMX file."""

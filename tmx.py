@@ -33,14 +33,25 @@ class Map(TypeSpecializable, Data, tag="map", maybe_remote=True, data_base=True,
           base=True, attrib="class"):
     """A TMX map"""
 
+    version: str = dfield()
+    tiledversion: str | None = dfield()
     type: str | None = dfield(rename_from="class")
+    orientation: str = dfield(default="orthogonal")
+    renderorder: str = dfield(default="right-down")
+    compressionlevel: int = dfield(default=-1)
     width: int = dfield()
     height: int = dfield()
     tilewidth: int = dfield()
     tileheight: int = dfield()
-    infinite: bool = dfield()
-    nextlayerid: int = dfield()
-    nextobjectid: int = dfield()
+    hexsidelength: int | None = dfield()
+    staggeraxis: str | None = dfield()
+    staggerindex: str | None = dfield()
+    parallaxoriginx: int = dfield(default=0)
+    parallaxoriginy: int = dfield(default=0)
+    backgroundcolor: str | None = dfield()
+    nextlayerid: int | None = dfield()
+    nextobjectid: int | None = dfield()
+    infinite: bool = dfield(default=False)
 
     tilesets: list[Tileset] = dfield(xml_child=True)
     layers: list[LayerBase] = dfield(xml_child=True)
@@ -67,10 +78,18 @@ class Tileset(Data, tag="tileset", maybe_remote=True, data_base=True):
     firstgid: int = dfield()
     img: Image | None = dfield(xml_child=True, rename_from="image", json_use_parent_obj=True)
 
-    _tiles: list[Tile] = dfield(xml_child=True, rename_from="tiles", default=[], temporary=True)
-    tiledata: dict[int, Tile] = dfield(loader=lambda obj, _loader: {i.id: i for i in obj._tiles})  # pylint: disable=protected-access
+    tiledata: dict[int, Tile]
 
     map: Map = alias("parent")
+
+    def load_xml(self, _loader: BaseLoader, element: ET.Element) -> None:
+        tiles = [i for i in element.data_children if isinstance(i, Tile)]
+        self.tiledata = {i.id: i for i in tiles}
+
+    def load_json(self, element: Any, path: str, _parent: Data | None, loader: BaseLoader, loaded_memo: list[Data]) -> None:
+        self.tiledata = {int(k): Tile._load(v, path, self, loader, loaded_memo) for k, v in element.get("tiles", {}).items()}
+        for tileid, tile in self.tiledata.items():
+            tile.id = tileid
 
     def __repr__(self):
         return (
@@ -87,21 +106,9 @@ class Tileset(Data, tag="tileset", maybe_remote=True, data_base=True):
 
 @BaseLoader.register
 class Grid(Data, tag="grid", data_base=True):
-    """A TMX grid object"""
+    """A TMX grid overlay information object"""
     width: int = dfield()
     height: int = dfield()
-
-@BaseLoader.register
-class Text(Data, tag="text", data_base=True):
-    """A TMX text element"""
-
-    fontfamily: str = dfield()
-    pixelsize: int = dfield()
-    wrap: bool = dfield()
-    text: str = dfield(xml_text=True)
-    color: str = dfield(default="#ffffff")
-
-    font: Any = dfield(loader=lambda obj, loader: loader.load_font(obj.fontfamily, obj.pixelsize))
 
 @BaseLoader.register
 class Image(Data, tag="image", data_base=True):
@@ -116,12 +123,24 @@ class Image(Data, tag="image", data_base=True):
         return f"<Image {os.path.basename(self.source)!r} ({self.width}x{self.height})>"
 
 @BaseLoader.register
+class Text(Data, tag="text", data_base=True):
+    """A TMX text element"""
+
+    fontfamily: str = dfield()
+    pixelsize: int = dfield()
+    wrap: bool = dfield()
+    text: str = dfield(xml_text=True)
+    color: str = dfield(default="#ffffff")
+
+    font: Any = dfield(loader=lambda obj, loader: loader.load_font(obj.fontfamily, obj.pixelsize))
+
+@BaseLoader.register
 class Tile(Data, tag="tile", data_base=True, xml_child_ignore=["objectgroup"]):
-    """Information about a tile. Immutable"""
+    # TODO: Add back immutability. Turns out, a custom __setattr__ was not very fast
+    """Information about a tile"""
     tileset: Tileset = alias("parent")
-    id: int = dfield()
-    properties: Properties | None = dfield(xml_child=True)
-    frozen: None = dfield(loader=lambda *_: None)  # loads last
+    id: int | None = dfield()  # Not optional, but loading from JSON will sometimes load this late
+    properties: Properties | None = dfield(xml_child=True, json_use_parent_obj=True)
 
     def __repr__(self):
         props = "" if self.properties is None else f" (properties {self.properties})"
@@ -136,12 +155,6 @@ class Tile(Data, tag="tile", data_base=True, xml_child_ignore=["objectgroup"]):
         self.tileset = tileset
         self.properties = properties
         self.id = id_
-        self.frozen = None
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if hasattr(self, "frozen"):
-            raise AttributeError("Tile objects are immutable")
-        return super().__setattr__(name, value)
 
     def __hash__(self) -> int:
         return hash(tuple((self.gid, self.properties)))
@@ -183,8 +196,14 @@ class Properties(Data, dict, tag="properties", data_base=True):
 
     def load_json(self, element: Any, path: str, parent: Data | None, loader: BaseLoader, loaded_memo: list[Data]) -> None:
         # pylint: disable=protected-access
-        for raw_property in element:
-            prop = loader.TAG_PARSERS["property"]._load(raw_property, path, self, loader, loaded_memo)
+        if "properties" not in element:
+            return  # blank
+        for key in element["properties"].keys():
+            prop = loader.TAG_PARSERS["property"]()
+            prop.name = key
+            prop._value1 = element["properties"][key]
+            prop.type = element["propertytypes"][key]
+            prop.value = Property.value.loader(prop, loader)
             self[prop.name] = prop.value
 
     def __hash__(self) -> int:
@@ -214,14 +233,16 @@ class Properties(Data, dict, tag="properties", data_base=True):
 
 @BaseLoader.register
 class Property(Data, tag="property", data_base=True):
+    # pylint: disable=protected-access
     """A key-value pair representing a single property. Usually not too useful"""
 
     name: str = dfield()
     type: str | None = dfield()
-    _value: str = dfield(rename_from="value", temporary=True)
+    _value1: str | None = dfield(rename_from="value", temporary=True)
+    _value2: str | None = dfield(xml_text=True, temporary=True)
     value: str | int | float | bool = dfield(loader=lambda obj, _loader: coerce({
         "bool": bool, "string": str, "int": int, "number": float
-    }.get(obj.type, str), obj._value))  # pylint: disable=protected-access
+    }.get(obj.type, str), obj._value1 if obj._value1 is not None else obj._value2))
 
     def __repr__(self):
         return f"<Property {self.name}={self.value!r}>"
@@ -234,14 +255,31 @@ class TileLayer(LayerBase, tag="layer", json_match=(lambda x: x["type"] == "tile
     """A TMX tile layer"""
 
     # TODO: Reintroduce TypeSpecializable here (mro magic broke it)
-    id: int = dfield()
+    id: int = dfield(default=0)
+    name: str = dfield(default="")
     map: Map = alias("parent")
     width: int = dfield()
     height: int = dfield()
+    opacity: float = dfield(default=1)
+    visible: bool = dfield(default=True)
+    tintcolor: str | None = dfield()
     offsetx: float = dfield(default=0.0)
     offsety: float = dfield(default=0.0)
-    properties: Properties | None = dfield(xml_child=True)
+    parallaxx: float = dfield(default=1.0)
+    parallaxy: float = dfield(default=1.0)
+
+    properties: Properties | None = dfield(xml_child=True, json_use_parent_obj=True)
     data: LayerData | None = dfield(xml_child=True)
+
+    def load_json(self, *_):
+        if self.data is not None:
+            self.data.width = self.width
+            self.data.height = self.height
+
+    def load_xml(self, *_):
+        if self.data is not None:
+            self.data.width = self.width
+            self.data.height = self.height
 
     def __repr__(self):
         return f"<Layer {self.width}x{self.height}>"
@@ -255,7 +293,7 @@ class ImageLayer(TypeSpecializable, LayerBase, tag="imagelayer", json_match=(lam
                  base=True, attrib="class"):
     """A TMX image layer."""
 
-    id: int = dfield()
+    id: int = dfield(default=0)
     map: Map = alias("parent")
     type: str | None = dfield(rename_from="class")
     offsetx: float = dfield(default=0.0)
@@ -270,9 +308,21 @@ class ObjectGroup(TypeSpecializable, LayerBase, tag="objectgroup", json_match=(l
                   base=True, attrib="class"):
     """A TMX object group."""
 
-    id: int = dfield()
     map: Map = alias("parent")
-    properties: Properties | None = dfield(xml_child=True)
+
+    id: int = dfield(default=0)
+    name: str = dfield(default="")
+    color: str | None = dfield()
+    opacity: float = dfield(default=1.0)
+    visible: bool = dfield(default=True)
+    tintcolor: str | None = dfield()
+    offsetx: float = dfield(default=0.0)
+    offsety: float = dfield(default=0.0)
+    parallaxx: float = dfield(default=1.0)
+    parallaxy: float = dfield(default=1.0)
+    draworder: str = dfield(default="topdown")
+
+    properties: Properties | None = dfield(xml_child=True, json_use_parent_obj=True)
     objects: list[Object] = dfield(xml_child=True)
 
     def __repr__(self):
@@ -282,14 +332,17 @@ class ObjectGroup(TypeSpecializable, LayerBase, tag="objectgroup", json_match=(l
 class Object(TypeSpecializable, Data, tag="object", data_base=True, attrib="type"):
     """A TMX object."""
 
-    id: int = dfield()
-    type: str | None = dfield()
+    id: int = dfield(default=0)
     name: str | None = dfield()
+    type: str | None = dfield()
     x: float = dfield()
     y: float = dfield()
     width: float = dfield()
     height: float = dfield()
+    rotation: float = dfield(default=0.0)
     gid: int | None = dfield()
+    visible: bool = dfield(default=True)
+
     text: Text | None = dfield(xml_child=True)
 
     def __repr__(self):
@@ -310,10 +363,9 @@ class Object(TypeSpecializable, Data, tag="object", data_base=True, attrib="type
     @property
     def tile(self) -> Tile:
         """Returns the tile associated with this object, if present."""
-        try:
-            return self.parent.map.tiles[self.gid]
-        except AttributeError:
-            raise TypeError("not a tile object") from None
+        if self.gid is None:
+            raise TypeError("not a tile object")
+        return self.parent.map.tiles[self.gid]
 
 @BaseLoader.register
 class LayerData(Data, list, tag="data", data_base=True):
