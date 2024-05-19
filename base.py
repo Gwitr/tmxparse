@@ -240,10 +240,8 @@ class Field:
         if isinstance(instance_data, ET.Element):
             src_name = self.dst_name or self.xml_rename_from
             if self.xml_child:
-                # print("xml_child", loader_class)
                 all_tags = {k: v for k, v in ctx.loader.PARSERS.items() if issubclass(v, loader_class)}
                 element_data = [(all_tags[i.tag], i) for i in instance_data if i.tag in all_tags]
-                # print(element_data)
                 if not is_array:
                     if not element_data:
                         if optional:
@@ -309,9 +307,7 @@ class EntryMeta(abc.ABCMeta):
                 json_use_parent: bool | None = None, tag: str | None = None, json_type: str | _NO_TYPE = NO_TYPE,
                 **kwargs: Any) -> type[Entry]:
         # pylint: disable=invalid-name
-
-        # accursed function. why is this so difficult. why. WHY
-
+        # cursed code thank you __slots__ for being annoying
         for base in bases:
             if hasattr(base, "FIELDS") and "FIELDS" not in fields:
                 fields["FIELDS"] = getattr(base, "FIELDS").copy()
@@ -376,7 +372,6 @@ class Entry(metaclass=EntryMeta):
         """Gets the filename of the nearest RemoteEntry this belongs to"""
         parent = self
         while True:
-            print(type(parent).__name__, hasattr(parent, "_source"))
             if isinstance(parent, RemoteEntry) and hasattr(parent, "_source"):
                 return parent._source
             parent = parent.parent
