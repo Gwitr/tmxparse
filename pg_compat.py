@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import cast, Any
 
 try:
     import pygame
@@ -18,8 +19,6 @@ class LayerRenderer:
     layer: tmx.LayerBase
     target_width: int
     target_height: int
-    last_x: int | None
-    last_y: int | None
 
     def __init__(self, layer, target_width, target_height):
         self.layer = layer
@@ -158,7 +157,7 @@ class MapRenderer:
 class PygameLoader(tmx.BaseLoader):
     """Pygame-aware TMX loader"""
 
-    __slots__ = ()
+    __slots__ = ("convert_alpha",)
 
     def __init__(self, convert_alpha: bool = True):
         self.convert_alpha = convert_alpha
@@ -169,8 +168,8 @@ class PygameLoader(tmx.BaseLoader):
             return img.convert_alpha()
         return img
 
-    def load_font(self, family: str, size: float) -> ft.SysFont:
-        return ft.SysFont(family, size)
+    def load_font(self, family: str, size: float) -> ft.Font:
+        return ft.SysFont(family, cast(int, size))
 
 @PygameLoader.register
 class Tile(tmx.Tile):
@@ -179,7 +178,7 @@ class Tile(tmx.Tile):
     __slots__ = ()
 
     @property
-    def surface(self) -> pygame.Surface:
+    def surface(self) -> pygame.Surface | None:
         """Fetches the Pygame graphic of the tile"""
         if self.tileset is None:
             return None
@@ -191,19 +190,19 @@ class Map(tmx.Map):
 
     __slots__ = ()
 
-    def render(self, rect: tuple[int, int, int, int] | None = None,
+    def render(self, in_rect: tuple[int, int, int, int] | None = None,
                to: pygame.Surface | None = None) -> pygame.Surface:
         """Render an image or subimage of the map"""
-        if rect is None:
-            rect = [0, 0, self.width * self.tilewidth, self.height * self.tileheight]
-        rect = pygame.Rect(rect)
+        if in_rect is None:
+            in_rect = (0, 0, self.width * self.tilewidth, self.height * self.tileheight)
+        rect = pygame.Rect(in_rect)
         if to is None:
             to = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
         for layer in self.layers:
             if isinstance(layer, TileLayer) and layer.visible:
-                layer.render(rect, to)
+                layer.render(cast(Any, tuple(rect)), to)
             if isinstance(layer, ObjectGroup) and layer.visible:
-                layer.render(rect, to)
+                layer.render(cast(Any, tuple(rect)), to)
         return to
 
 @PygameLoader.register
@@ -212,12 +211,13 @@ class ObjectGroup(tmx.ObjectGroup):
 
     __slots__ = ()
 
-    def render(self, rect: tuple[int, int, int, int] | None = None,
+    def render(self, in_rect: tuple[int, int, int, int] | None = None,
                to: pygame.Surface | None = None) -> pygame.Surface:
         """Render an image or subimage of the layer"""
         if to is None:
             raise ValueError("ObjectGroup.render requires a target")
-        rect = pygame.Rect(rect)
+        assert in_rect is not None
+        rect = pygame.Rect(in_rect)
         for obj in sorted(self.objects, key=lambda obj: -obj.y):  # TODO: Don't sort literally everything every time this is called
             if obj.has_tile and obj.tile.surface:
                 to.blit(obj.tile.surface, (obj.x - rect.x, obj.y - obj.tile.surface.get_height() - rect.y))
@@ -229,14 +229,14 @@ class TileLayer(tmx.TileLayer):
 
     __slots__ = ()
 
-    def render(self, rect: tuple[int, int, int, int] | None = None,
+    def render(self, in_rect: tuple[int, int, int, int] | None = None,
                to: pygame.Surface | None = None) -> pygame.Surface:
         # pylint: disable=no-member
         # pylint dead convinced that self.map is a Field instance at all times
         """Render an image or subimage of the layer"""
-        if rect is None:
-            rect = [0, 0, self.width * self.map.tilewidth, self.height * self.map.tileheight]
-        rect = pygame.Rect(rect)
+        if in_rect is None:
+            in_rect = (0, 0, self.width * self.map.tilewidth, self.height * self.map.tileheight)
+        rect = pygame.Rect(in_rect)
         if to is None:
             to = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
 

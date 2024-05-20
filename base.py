@@ -8,7 +8,7 @@ import sys
 import json
 import types
 
-from typing import TypeVar, Any, Callable, Union, ClassVar, get_origin, get_args
+from typing import TypeVar, Any, Callable, Union, ClassVar, TYPE_CHECKING, get_origin, get_args
 
 import xml.etree.ElementTree as ET
 
@@ -25,11 +25,23 @@ def iopen(path, mode="r", **kwargs):
         return open(os.path.join(dirname, files[name]), mode, **kwargs)  # pylint: disable=unspecified-encoding
     raise FileNotFoundError(path)
 
-class SpecializableMixin:
+def not_optional(x: T | None) -> T:
+    assert x is not None, "must not be None"
+    return x
+
+class _SpecializableMixinBase:
+
+    # for mypy
+    @classmethod
+    def _load(cls, data: ET.Element | dict, parent: Entry | None, ctx: LoaderContext) -> Entry:
+        raise NotImplementedError
+
+class SpecializableMixin(_SpecializableMixinBase):
     """Mixin that allows a type to be specialized at load time based on an XML attribute"""
 
     __slots__ = ()
 
+    ATTRIB: ClassVar[str | None] = None
     OBJECT_TYPES: ClassVar[dict[str, type[SpecializableMixin]]]
     OBJECT_BASE: ClassVar[type[SpecializableMixin] | None] = None
     INHERIT_BASE: ClassVar[type[SpecializableMixin] | None] = None
@@ -49,15 +61,14 @@ class SpecializableMixin:
             cls.OBJECT_TYPES = {}
             cls.OBJECT_BASE = cls
         if tiled_class is not None:
-            cls.TILED_CLASS = tiled_class
             cls.OBJECT_TYPES[tiled_class] = cls  # pylint: disable=unsupported-assignment-operation
 
     @classmethod
-    def _load(cls, data: T, parent: Entry | None, ctx: LoaderContext) -> Entry:
+    def _load(cls, data: ET.Element | dict, parent: Entry | None, ctx: LoaderContext) -> Entry:
         if cls is not cls.OBJECT_BASE:
             return super(SpecializableMixin, cls)._load(data, parent, ctx)  # pylint: disable=no-member
 
-        stype = data.attrib.get(cls.ATTRIB) if isinstance(data, ET.Element) else data.get(cls.ATTRIB)
+        stype = data.attrib.get(not_optional(cls.ATTRIB)) if isinstance(data, ET.Element) else data.get(not_optional(cls.ATTRIB))
         if stype is None or stype not in cls.OBJECT_TYPES:
             return super(SpecializableMixin, cls)._load(data, parent, ctx)  # pylint: disable=no-member
 
@@ -120,14 +131,13 @@ class LoaderContext:
         self.loaded_entries_memo = []
         self.entry_data_map = {}
 
-    def load(self, cls: type | None, data: T, parent: Entry | None):
+    def load(self, cls: type[Any] | None, data: T, parent: Entry | None):
         """Loads a JSON or XML datum, attempting to turn it into an instance of the given
         class (whose parent, if possible, will be set to the parameter passed)"""
         if cls is None:
-            if isinstance(data, ET.Element):
-                cls = self.loader.LOADERS[data.tag]
-            else:
+            if not isinstance(data, ET.Element):
                 raise ValueError("cannot guess class for JSON object")
+            cls = self.loader.LOADERS[data.tag]
 
         if issubclass(cls, Entry):
             obj = cls._load(data, parent, self)  # pylint: disable=protected-access
@@ -152,68 +162,31 @@ class Field:
     """Information about a field of an Entry"""
 
     _type_info: tuple[type, bool, bool]
-
-    dst_name: str | None
-    owner: type[Entry] | None
-
-    alias: str | None
+    dst_name: str
+    owner: type[Entry]
     default: Any
-    xml_child: bool
-    xml_text: bool
-    loader: Callable[[], ] | None
-    xml_rename_from: str | None
-    json_rename_from: str | None
 
-    def __init__(self, alias=None, default=None, xml_child=False, xml_text=False, loader=None,
-                 xml_rename_from=None, json_rename_from=None, rename_from=None):
+    def __init__(self, *, default=None):
         self._type_info = None
-        self.dst_name = None
-        self.owner = None
-
-        self.alias = alias
         self.default = default
-        self.xml_child = xml_child
-        self.xml_text = xml_text
-        self.loader = loader
-
-        self.xml_rename_from = self.json_rename_from = rename_from
-        if xml_rename_from is not None:
-            self.xml_rename_from = xml_rename_from
-        if json_rename_from is not None:
-            self.json_rename_from = json_rename_from
 
     @property
     def type_info(self):  # pylint: disable=missing-function-docstring
         if self._type_info is None:
             # pylint: disable=eval-used
-            if self.loader:
-                self._type_info = None, None, None
-            else:
-                gvars = sys.modules[self.owner.__module__].__dict__
-                annotation = eval(self.owner.__annotations__[self.dst_name], gvars, gvars)
-                is_list = False
-                optional = False
-                if get_origin(annotation) in (Union, types.UnionType):
-                    optional = True
-                    possible_types = list(get_args(annotation))
-                    possible_types.remove(Field)
-                    if len(possible_types) == 1:
-                        optional = False
-                    else:
-                        if len(possible_types) != 2 or type(None) not in possible_types:
-                            raise ValueError("union isn't type")
-                        possible_types.remove(type(None))
-                    annotation = possible_types[0]
-                if get_origin(annotation) is list:
-                    is_list = True
-                    annotation = get_args(annotation)[0]
-                if annotation is None:
-                    annotation = type(None)
-                if self.default is not None:
-                    optional = True
-                self._type_info = annotation, is_list, optional
-                if is_list and not self.xml_child:
-                    raise ValueError("array field must have xml_child set")
+            gvars = sys.modules[self.owner.__module__].__dict__
+            annotation = eval(self.owner.__annotations__[self.dst_name], gvars, gvars)
+            is_list = False
+            optional = False
+            if get_origin(annotation) in (Union, types.UnionType):
+                optional = True
+                annotation, = [i for i in get_args(annotation) if i is not None and not issubclass(i, Field)]
+            if get_origin(annotation) is list:
+                is_list = True
+                annotation = get_args(annotation)[0]
+            if annotation is None:
+                annotation = type(None)
+            self._type_info = annotation, is_list, (optional or self.default is not None)
         return self._type_info
 
     def bind(self, name: str, owner: type[Entry]):  # used to be __set_name__ but metaclass magic forced me to abandon that
@@ -221,80 +194,98 @@ class Field:
         self.dst_name = name
         self.owner = owner
 
-    def load(self, instance: Entry, instance_data: T, parent: Entry | None, ctx: LoaderContext):
+    def load(self, instance: Entry, _instance_data: ET.Element | dict, _parent: Entry | None, _ctx: LoaderContext) -> Any:
         """Loads this field from XML or JSON"""
-        loader_class, is_array, optional = self.type_info
+        if self.type_info[2]:
+            return self.default
+        raise ValueError(f"missing attribute {self.dst_name} on {instance.__class__.__qualname__}")
 
-        if self.alias is not None:
-            try:
-                return getattr(instance, self.alias)
-            except AttributeError:
-                field = instance.FIELDS[self.alias]
-                value = field.load(instance, instance_data, parent, ctx)
-                setattr(instance, field.dst_name, value)
-                return value
+class CustomLoaderField(Field):
+    loader: Callable[[Entry, T, Entry | None, LoaderContext], U]
 
-        if self.loader:
-            return self.loader(instance, instance_data, parent, ctx)
+    def __init__(self, loader, **kwargs):
+        super().__init__(**kwargs)
+        self.loader = loader
+
+    def load(self, instance: Entry, instance_data: ET.Element | dict, parent: Entry | None, ctx: LoaderContext) -> Any:
+        return self.loader(instance, instance_data, parent, ctx)
+
+class AliasField(Field):
+    to: str
+
+    def __init__(self, to, **kwargs):
+        super().__init__(**kwargs)
+        self.to = to
+
+    def load(self, instance: Entry, instance_data: ET.Element | dict, parent: Entry | None, ctx: LoaderContext) -> Any:
+        try:
+            return getattr(instance, self.to)
+        except AttributeError:
+            field = instance.FIELDS[self.to]
+            value = field.load(instance, instance_data, parent, ctx)
+            setattr(instance, field.dst_name, value)
+            return value
+
+class ParsedField(Field):
+    xml_child: bool
+    xml_text: bool
+
+    xml_rename_from: str | None
+    json_rename_from: str | None
+
+    def __init__(self, *, xml_child=False, xml_text=False, xml_rename_from=None, json_rename_from=None, rename_from=None, **kwargs):
+        super().__init__(**kwargs)
+        self.xml_child = xml_child
+        self.xml_text = xml_text
+        self.xml_rename_from = self.json_rename_from = rename_from
+        if xml_rename_from is not None:
+            self.xml_rename_from = xml_rename_from
+        if json_rename_from is not None:
+            self.json_rename_from = json_rename_from
+
+    def load(self, instance: Entry, instance_data: ET.Element | dict, parent: Entry | None, ctx: LoaderContext) -> Any:  # 50 loc
+        loader_class, is_array, _ = self.type_info
+
+        all_tags_xml = {}
+        all_tags_json: dict[str, list[type[Entry]]] = {}
+        for k, v in ctx.loader.PARSERS.values():
+            if issubclass(v, loader_class):
+                all_tags_xml[k] = v
+                all_tags_json.setdefault(v.JSON_TYPE, []).append(v)
 
         if isinstance(instance_data, ET.Element):
             src_name = self.dst_name or self.xml_rename_from
             if self.xml_child:
-                all_tags = {k: v for k, v in ctx.loader.PARSERS.items() if issubclass(v, loader_class)}
-                element_data = [(all_tags[i.tag], i) for i in instance_data if i.tag in all_tags]
-                if not is_array:
-                    if not element_data:
-                        if optional:
-                            return self.default
-                        raise ValueError(f"no instances of child {loader_class.__qualname__} when 1 expected")
-                    if len(element_data) != 1:
-                        raise ValueError(f"multiple instances of child {loader_class.__qualname__} when 1 expected")
-                    element_data = element_data[0]
-            elif self.xml_text:
+                element_data = [ctx.load(all_tags_xml[elem.tag], elem, instance) for elem in instance_data if elem.tag in all_tags_xml]
+                if is_array:
+                    return element_data
+                if len(element_data) > 1:
+                    raise ValueError(f"multiple instances of child {loader_class.__qualname__} when 1 expected")
+                return element_data[0] if element_data else super().load(instance, instance_data, parent, ctx)
+            if self.xml_text:
                 return instance_data.text
-            else:
-                try:
-                    element_data = loader_class, instance_data.attrib[src_name]
-                except KeyError:
-                    if optional:
-                        return self.default
-                    raise ValueError(f"missing attribute {src_name} on {type(instance).__qualname__}") from None
+            if src_name in instance_data.attrib:
+                return ctx.load(loader_class, instance_data.attrib[src_name], instance)
+            return super().load(instance, instance_data, parent, ctx)
 
-        else:
-            if issubclass(loader_class, Entry) and loader_class.JSON_NO_AUTOLOAD:
-                element_data = [[loader_class, None]] if is_array else [loader_class, None]
-            else:
-                src_name = self.dst_name or self.json_rename_from
-                try:
-                    elems = [instance_data[src_name]] if not is_array else instance_data[src_name]
-                except KeyError:
-                    if optional:
-                        return self.default
-                    raise ValueError(f"missing key {src_name} on {type(instance).__qualname__}") from None
+        src_name = self.dst_name or self.json_rename_from
+        if src_name not in instance_data:
+            return super().load(instance, instance_data, parent, ctx)
+        child_data = instance_data[src_name]
 
-                all_tags = {}
-                for v in ctx.loader.PARSERS.values():
-                    if issubclass(v, loader_class):
-                        all_tags.setdefault(v.JSON_TYPE, []).append(v)
+        element_data = []
+        for child in (child_data if is_array else [child_data]):
+            value_type = loader_class
+            if issubclass(value_type, Entry):
+                possible_types = all_tags_json[child["type"] if isinstance(child, dict) and "type" in child else EntryMeta.NO_TYPE]
+                if len(possible_types) != 1:
+                    start = "ambiguous" if possible_types else "no possible"
+                    end = ": could be one of " + ', '.join(i.__qualname__ for i in possible_types) if possible_types else ""
+                    raise ValueError(f"{start} type for field {self.dst_name} of {instance.__class__.__qualname__}{end}")
+                value_type = possible_types[0]
+            element_data.append(ctx.load(value_type, child, instance))
 
-                element_data = []
-                for child in elems:
-                    if issubclass(loader_class, Entry):
-                        possible_types = all_tags[child["type"] if isinstance(child, dict) and "type" in child else EntryMeta.NO_TYPE]
-                        if len(possible_types) > 1:
-                            ts = ', '.join(i.__qualname__ for i in possible_types.values())
-                            raise ValueError(f"ambiguous type for field {self.dst_name} of {instance.__class__.__qualname__}: could be one of {ts}")
-                        if len(possible_types) == 0:
-                            raise ValueError(f"no fitting type for field {self.dst_name} of {instance.__class__.__qualname__}")
-                        value_type = possible_types[0]
-                    else:
-                        value_type = loader_class
-                    element_data.append([value_type, child])
-
-                if not is_array:
-                    element_data = element_data[0]
-
-        return [ctx.load(c, i, instance) for c, i in element_data] if is_array else ctx.load(*element_data, instance)
+        return element_data if is_array else element_data[0]
 
 class EntryMeta(abc.ABCMeta):
     """Metaclass of Entry types"""
@@ -321,7 +312,7 @@ class EntryMeta(abc.ABCMeta):
         fields["FIELDS"].update({k: v for k, v in fields.items() if isinstance(v, Field)})
         fields = {k: v for k, v in fields.items() if k not in fields["FIELDS"]}
         fields["__slots__"] = tuple({*fields.get("__slots__", ()), *fields["FIELDS"].keys()})
-        cls: type = super().__new__(mcs, name, bases, fields, **kwargs)
+        cls: type[Entry] = abc.ABCMeta.__new__(mcs, name, bases, fields, **kwargs)
         if json_use_parent is not None:
             cls.JSON_USE_PARENT = json_use_parent
         if tag is not None:
@@ -331,6 +322,8 @@ class EntryMeta(abc.ABCMeta):
         for k, v in cls.FIELDS.items():
             v.bind(k, cls)
         return cls
+
+TEntry = TypeVar("TEntry", bound="Entry")
 
 class Entry(metaclass=EntryMeta):
     """The base class for every element present in a TMX file."""
@@ -347,12 +340,12 @@ class Entry(metaclass=EntryMeta):
     parent: Entry | None
 
     @classmethod
-    def _load(cls: type[U], data: T, parent: Entry | None, ctx: LoaderContext) -> U:
+    def _load(cls: type[TEntry], data: ET.Element | dict, parent: Entry | None, ctx: LoaderContext) -> TEntry:
         instance = cls()
         instance._fill(data, parent, ctx)
         return instance
 
-    def _fill(self, data: T, parent: Entry | None, ctx: LoaderContext) -> None:
+    def _fill(self, data: ET.Element | dict, parent: Entry | None, ctx: LoaderContext) -> None:
         if isinstance(data, dict) and self.JSON_USE_PARENT:
             data = ctx.entry_data_map[parent]
         self.parent = parent
@@ -388,7 +381,7 @@ class RemoteEntry(Entry):
     _source: str
 
     @classmethod
-    def _load(cls: type[U], data: T, parent: Entry | None, ctx: LoaderContext) -> U:
+    def _load(cls: type[TEntry], data: ET.Element | dict, parent: Entry | None, ctx: LoaderContext) -> TEntry:
         orig_data = data
         if isinstance(data, dict) and cls.JSON_USE_PARENT:
             data = ctx.entry_data_map[parent]
@@ -419,6 +412,6 @@ class RemoteEntry(Entry):
 
         return super()._load(orig_data, parent, ctx)
 
-    def _fill(self, data: T, parent: Entry | None, ctx: LoaderContext) -> None:
+    def _fill(self, data: ET.Element | dict, parent: Entry | None, ctx: LoaderContext) -> None:
         self._source = ctx.path
         super()._fill(data, parent, ctx)

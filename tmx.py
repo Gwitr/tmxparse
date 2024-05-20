@@ -8,9 +8,15 @@ import types
 import bisect
 from collections import UserDict
 import xml.etree.ElementTree as ET
-from typing import Generator, Any, Union, get_origin, get_args, cast
+from typing import Generator, Any, Union, get_origin, get_args, cast, TypeVar
 
-from base import BaseLoader, SpecializableMixin, Entry, Field, LoaderContext, RemoteEntry
+from .base import BaseLoader, SpecializableMixin, Entry, Field, CustomLoaderField, AliasField, ParsedField, LoaderContext, RemoteEntry
+
+T = TypeVar("T")
+
+def not_optional(x: T | None) -> T:
+    assert x is not None, "must not be None"
+    return x
 
 class TileCollection:
     """A helper class that lets you fetch a tile by its GID"""
@@ -20,49 +26,49 @@ class TileCollection:
 
     def __init__(self, tile_cls: type[Tile], tilesets: list[Tileset]):
         self.tile_cls = tile_cls
-        self.tilesets = sorted(tilesets, key=lambda x: x.firstgid)
+        self.tilesets = sorted(tilesets, key=lambda x: (x.firstgid))
 
     def __getitem__(self, gid: int) -> Tile:
         if gid == 0:
             return self.tile_cls(None, 0, None)
-        tileset_idx = bisect.bisect_left(self.tilesets, gid, key=lambda x: x.firstgid)
+        tileset_idx = bisect.bisect_left(self.tilesets, gid, key=lambda x: (x.firstgid))
         if len(self.tilesets) == tileset_idx or self.tilesets[tileset_idx].firstgid != gid:
             tileset_idx -= 1
         tileset = self.tilesets[tileset_idx]
-        return tileset[gid - tileset.firstgid]
+        return tileset[gid - (tileset.firstgid)]
 
 @BaseLoader.register
 class Map(SpecializableMixin, RemoteEntry, tag="map", base=True, attrib="class"):
     """A TMX map"""
 
-    version: str | Field = Field()
-    tiledversion: str | None | Field = Field()
-    type: str | None | Field = Field(rename_from="class")
-    orientation: str | Field = Field()
-    renderorder: str | Field = Field()
-    compressionlevel: int | Field = Field(default=-1)
-    width: int | Field = Field()
-    height: int | Field = Field()
-    tilewidth: int | Field = Field()
-    tileheight: int | Field = Field()
-    hexsidelength: int | None | Field = Field()
-    staggeraxis: str | None | Field = Field()
-    staggerindex: str | None | Field = Field()
-    parallaxoriginx: int | Field = Field(default=0)
-    parallaxoriginy: int | Field = Field(default=0)
-    backgroundcolor: str | None | Field = Field()
-    nextlayerid: int | None | Field = Field()
-    nextobjectid: int | None | Field = Field()
-    infinite: bool | Field = Field(default=False)
+    version: str | Any = ParsedField()
+    tiledversion: str | None | Any = ParsedField()
+    type: str | None | Any = ParsedField(rename_from="class")
+    orientation: str | Any = ParsedField()
+    renderorder: str | Any = ParsedField()
+    compressionlevel: int | Any = ParsedField(default=-1)
+    width: int | Any = ParsedField()
+    height: int | Any = ParsedField()
+    tilewidth: int | Any = ParsedField()
+    tileheight: int | Any = ParsedField()
+    hexsidelength: int | None | Any = ParsedField()
+    staggeraxis: str | None | Any = ParsedField()
+    staggerindex: str | None | Any = ParsedField()
+    parallaxoriginx: int | Any = ParsedField(default=0)
+    parallaxoriginy: int | Any = ParsedField(default=0)
+    backgroundcolor: str | None | Any = ParsedField()
+    nextlayerid: int | None | Any = ParsedField()
+    nextobjectid: int | None | Any = ParsedField()
+    infinite: bool | Any = ParsedField(default=False)
 
-    tilesets: list[Tileset] | Field = Field(xml_child=True)
-    layers: list[LayerBase] | Field = Field(xml_child=True)
+    tilesets: list[Tileset] | Any = ParsedField(xml_child=True)
+    layers: list[LayerBase] | Any = ParsedField(xml_child=True)
 
-    imgs: list[Image] | Field = Field(loader=lambda obj, _data, _parent, _ctx: (
+    imgs: list[Image] | Any = CustomLoaderField(lambda obj, _data, _parent, _ctx: (
         [i.img for i in obj.tilesets if i.img is not None] +
         [i.img for i in obj.layers if isinstance(i, ImageLayer)]
     ))
-    tiles: TileCollection | Field = Field(loader=lambda obj, _data, _parent, ctx: TileCollection(ctx.loader.PARSERS["tile"], obj.tilesets))
+    tiles: TileCollection | Any = CustomLoaderField(lambda obj, _data, _parent, ctx: TileCollection(ctx.loader.PARSERS["tile"], obj.tilesets))
 
     def __repr__(self):
         return f"<Map {os.path.basename(self.source)!r} {self.width}x{self.height}>"
@@ -73,25 +79,25 @@ class Tileset(RemoteEntry, tag="tileset"):
 
     __slots__ = ("tiledata",)
 
-    tile_cls: type[Tile] | Field = Field(loader=lambda _obj, _data, _parent, ctx: ctx.loader.PARSERS["tile"])
+    tile_cls: type[Tile] | Any = CustomLoaderField(lambda _obj, _data, _parent, ctx: ctx.loader.PARSERS["tile"])
 
-    tilewidth: int | Field = Field()
-    tileheight: int | Field = Field()
-    tilecount: int | Field = Field()
-    columns: int | Field = Field()
-    firstgid: int | Field = Field()
-    img: Image | None | Field = Field(xml_child=True, rename_from="image")
+    tilewidth: int | Any = ParsedField()
+    tileheight: int | Any = ParsedField()
+    tilecount: int | Any = ParsedField()
+    columns: int | Any = ParsedField()
+    firstgid: int | Any = ParsedField()
+    img: Image | None | Any = ParsedField(xml_child=True, rename_from="image")
 
     tiledata: dict[int, Tile]
 
-    map: Map | Field = Field(alias="parent")
+    map: Map | Any = AliasField("parent")
 
     @classmethod
     def _load(cls, data: Any, parent: Entry | None, ctx: LoaderContext) -> Tileset:
-        self = super()._load(data, parent, ctx)
+        self: Tileset = super()._load(data, parent, ctx)
         if isinstance(data, ET.Element):
             tiles = [i for i in data if isinstance(i, Tile)]
-            self.tiledata = {i.id: i for i in tiles}
+            self.tiledata = {not_optional((i.id)): i for i in tiles}
         else:
             self.tiledata = {int(k): ctx.load(ctx.loader.PARSERS["tile"], v, self) for k, v in data.get("tiles", {}).items()}
             for tileid, tile in self.tiledata.items():
@@ -105,25 +111,25 @@ class Tileset(RemoteEntry, tag="tileset"):
         )
 
     def __getitem__(self, tileid: int) -> Tile:
-        if tileid < 0 or tileid >= self.tilecount:
+        if tileid < 0 or tileid >= (self.tilecount):
             raise IndexError(f"no tile #{tileid}")
         if tileid in self.tiledata:
             return self.tiledata[tileid]
-        return self.tile_cls(self, tileid, None)  # pylint: disable=not-callable
+        return (self.tile_cls)(self, tileid, None)  # pylint: disable=not-callable
 
 @BaseLoader.register
 class Grid(Entry, tag="grid"):
     """A TMX grid overlay information object"""
-    width: int | Field = Field()
-    height: int | Field = Field()
+    width: int | Any = ParsedField()
+    height: int | Any = ParsedField()
 
 @BaseLoader.register
 class Image(Entry, tag="image", json_use_parent=True):
     """A TMX image element"""
-    width: int | None | Field = Field(json_rename_from="imagewidth")
-    height: int | None | Field = Field(json_rename_from="imageheight")
-    source: str | None | Field = Field(json_rename_from="image")
-    surface: Any | Field = Field(loader=lambda obj, data, parent, ctx: ctx.loader.load_image(
+    width: int | None | Any = ParsedField(json_rename_from="imagewidth")
+    height: int | None | Any = ParsedField(json_rename_from="imageheight")
+    source: str | None | Any = ParsedField(json_rename_from="image")
+    surface: Any | Any = CustomLoaderField(lambda obj, data, parent, ctx: ctx.loader.load_image(
         os.path.join(os.path.dirname(obj.filename), obj.source)))
 
     def __repr__(self):
@@ -133,21 +139,21 @@ class Image(Entry, tag="image", json_use_parent=True):
 class Text(Entry, tag="text"):
     """A TMX text element"""
 
-    fontfamily: str | Field = Field()
-    pixelsize: int | Field = Field()
-    wrap: bool | Field = Field()
-    text: str | Field = Field(xml_text=True)
-    color: str | Field = Field(default="#ffffff")
+    fontfamily: str | Any = ParsedField()
+    pixelsize: int | Any = ParsedField()
+    wrap: bool | Any = ParsedField()
+    text: str | Any = ParsedField(xml_text=True)
+    color: str | Any = ParsedField(default="#ffffff")
 
-    font: Any | Field = Field(loader=lambda obj, data, parent, ctx: ctx.loader.load_font(obj.fontfamily, obj.pixelsize))
+    font: Any | Any = CustomLoaderField(lambda obj, data, parent, ctx: ctx.loader.load_font(obj.fontfamily, obj.pixelsize))
 
 @BaseLoader.register
 class Tile(Entry, tag="tile"):  # , xml_child_ignore=["objectgroup"]):
     # TODO: Add back immutability. Turns out a custom __setattr__ was not very fast
     """Information about a tile"""
-    tileset: Tileset | Field = Field(alias="parent")
-    id: int | None | Field = Field()  # Not optional, but loading from JSON will sometimes load this late
-    properties: Properties | None | Field = Field(xml_child=True)
+    tileset: Tileset | None | Any = AliasField("parent")
+    id: int | None | Any = ParsedField()  # Not optional, but loading from JSON will sometimes load this late
+    properties: Properties | None | Any = ParsedField(xml_child=True)
 
     def __repr__(self):
         props = "" if self.properties is None else f" (properties {self.properties})"
@@ -159,7 +165,7 @@ class Tile(Entry, tag="tile"):  # , xml_child_ignore=["objectgroup"]):
             if tileset is None:
                 return
             raise ValueError("__init__ takes 0, 2, or 3 arguments, 1 given")
-        self.tileset = tileset
+        self.parent = self.tileset = tileset
         self.properties = properties
         self.id = id_
 
@@ -172,12 +178,12 @@ class Tile(Entry, tag="tile"):  # , xml_child_ignore=["objectgroup"]):
         return self.gid == other.gid and self.properties == other.properties
 
     @property
-    def rect(self) -> tuple[int, int, int, int]:
+    def rect(self) -> tuple[int, int, int, int] | None:
         """Returns (x, y, w, h) location information for the tile within its tileset"""
         if self.tileset is None:
             return None
-        offsx = (self.id % self.tileset.columns) * self.tileset.tilewidth
-        offsy = (self.id // self.tileset.columns) * self.tileset.tileheight
+        offsx = (not_optional(self.id) % self.tileset.columns) * self.tileset.tilewidth
+        offsy = (not_optional(self.id) // self.tileset.columns) * self.tileset.tileheight
         return (offsx, offsy, self.tileset.tilewidth, self.tileset.tileheight)
 
     @property
@@ -185,7 +191,7 @@ class Tile(Entry, tag="tile"):  # , xml_child_ignore=["objectgroup"]):
         """Returns the GID of the tile"""
         if self.tileset is None:
             return 0
-        return self.tileset.firstgid + self.id
+        return self.tileset.firstgid + not_optional(self.id)
 
 @BaseLoader.register
 class Properties(Entry, UserDict, tag="properties", json_use_parent=True):
@@ -205,12 +211,13 @@ class Properties(Entry, UserDict, tag="properties", json_use_parent=True):
             self.types.update(types)
 
     @classmethod
-    def _load(cls, data: Any, parent: Entry | None, ctx: LoaderContext) -> Tileset:
+    def _load(cls, data: Any, parent: Entry | None, ctx: LoaderContext) -> Properties:
         self = cls()
         if isinstance(data, ET.Element):
             for i in data:
-                self.types[i.name] = i.type
-                self[i.name] = i.value
+                # TODO: text properties
+                self.types[i.attrib["name"]] = i.attrib["type"]
+                self[i.attrib["name"]] = i.attrib["value"]
         elif "properties" in data:
             for key in data["properties"].keys():
                 # TODO: fix all of this
@@ -218,7 +225,7 @@ class Properties(Entry, UserDict, tag="properties", json_use_parent=True):
                 prop.name = key
                 prop._value1 = data["properties"][key]
                 prop.type = data["propertytypes"][key]
-                prop.value = Property.FIELDS["value"].loader(prop, data, parent, ctx)
+                prop.value = cast(CustomLoaderField, Property.FIELDS["value"]).loader(prop, data, parent, ctx)
                 self.types[prop.name] = prop.type
                 self[prop.name] = prop.value
         return self
@@ -275,11 +282,11 @@ class Property(Entry, tag="property"):
     # pylint: disable=protected-access
     """A key-value pair representing a single property. Usually not too useful"""
 
-    name: str | Field = Field()
-    type: str | None | Field = Field()
-    _value1: str | None | Field = Field(rename_from="value")
-    _value2: str | None | Field = Field(xml_text=True)
-    value: str | int | float | bool | Field = Field(loader=lambda obj, _data, _parent, _ctx: coerce({
+    name: str | Any = ParsedField()
+    type: str | None | Any = ParsedField()
+    _value1: str | None | Any = ParsedField(rename_from="value")
+    _value2: str | None | Any = ParsedField(xml_text=True)
+    value: str | int | float | bool | Any = CustomLoaderField(lambda obj, _data, _parent, _ctx: coerce({
         "bool": (lambda x: False if x.lower() == "false" else bool(x)), "string": str, "int": int, "number": float
     }.get(obj.type, str), obj._value1 if obj._value1 is not None else obj._value2))
 
@@ -294,21 +301,21 @@ class TileLayer(LayerBase, tag="layer", json_type="tilelayer"):
     """A TMX tile layer"""
 
     # TODO: Reintroduce SpecializableMixin here (mro magic broke it)
-    id: int | Field = Field(default=0)
-    name: str | Field = Field(default="")
-    map: Map | Field = Field(alias="parent")
-    width: int | Field = Field()
-    height: int | Field = Field()
-    opacity: float | Field = Field(default=1)
-    visible: bool | Field = Field(default=True)
-    tintcolor: str | None | Field = Field()
-    offsetx: float | Field = Field(default=0.0)
-    offsety: float | Field = Field(default=0.0)
-    parallaxx: float | Field = Field(default=1.0)
-    parallaxy: float | Field = Field(default=1.0)
+    id: int | Any = ParsedField(default=0)
+    name: str | Any = ParsedField(default="")
+    map: Map | Any = AliasField("parent")
+    width: int | Any = ParsedField()
+    height: int | Any = ParsedField()
+    opacity: float | Any = ParsedField(default=1)
+    visible: bool | Any = ParsedField(default=True)
+    tintcolor: str | None | Any = ParsedField()
+    offsetx: float | Any = ParsedField(default=0.0)
+    offsety: float | Any = ParsedField(default=0.0)
+    parallaxx: float | Any = ParsedField(default=1.0)
+    parallaxy: float | Any = ParsedField(default=1.0)
 
-    properties: Properties | None | Field = Field(xml_child=True)
-    data: LayerData | None | Field = Field(xml_child=True)
+    properties: Properties | None | Any = ParsedField(xml_child=True)
+    data: LayerData | None | Any = ParsedField(xml_child=True)
 
     @classmethod
     def _load(cls, data: Any, parent: Entry | None, ctx: LoaderContext) -> TileLayer:
@@ -316,29 +323,29 @@ class TileLayer(LayerBase, tag="layer", json_type="tilelayer"):
         # pylint absolutely INSISTENT that asdf is an instance of Entry for some reason
         # pylint: disable=no-member
         if asdf.data is not None:
-            asdf.data.width = asdf.width
-            asdf.data.height = asdf.height
+            asdf.data.width = cast(int, asdf.width)
+            asdf.data.height = cast(int, asdf.height)
         return asdf
 
     def __repr__(self):
         return f"<Layer {self.width}x{self.height}>"
 
     def __iter__(self) -> Generator[tuple[int, int, Tile], None, None]:
-        for i, gid in enumerate(self.data):
+        for i, gid in enumerate(not_optional((self.data))):
             yield (i % self.width, i // self.width, self.map.tiles[gid])  # pylint: disable=no-member
 
 @BaseLoader.register
 class ImageLayer(SpecializableMixin, LayerBase, tag="imagelayer", base=True, attrib="class", json_type="imagelayer"):
     """A TMX image layer."""
 
-    id: int | Field = Field(default=0)
-    map: Map | Field = Field(alias="parent")
-    type: str | None | Field = Field(rename_from="class")
-    offsetx: float | Field = Field(default=0.0)
-    offsety: float | Field = Field(default=0.0)
-    parallaxx: float | Field = Field(default=1.0)
-    parallaxy: float | Field = Field(default=1.0)
-    img: Image | Field = Field(xml_child=True)
+    id: int | Any = ParsedField(default=0)
+    map: Map | Any = AliasField("parent")
+    type: str | None | Any = ParsedField(rename_from="class")
+    offsetx: float | Any = ParsedField(default=0.0)
+    offsety: float | Any = ParsedField(default=0.0)
+    parallaxx: float | Any = ParsedField(default=1.0)
+    parallaxy: float | Any = ParsedField(default=1.0)
+    img: Image | Any = ParsedField(xml_child=True)
 
     def __repr__(self):
         return f"<ImageLayer {self.img!r}>"
@@ -347,22 +354,22 @@ class ImageLayer(SpecializableMixin, LayerBase, tag="imagelayer", base=True, att
 class ObjectGroup(SpecializableMixin, LayerBase, tag="objectgroup", base=True, attrib="class", json_type="objectgroup"):
     """A TMX object group."""
 
-    map: Map | Field = Field(alias="parent")
+    map: Map | Any = AliasField("parent")
 
-    id: int | Field = Field(default=0)
-    name: str | Field = Field(default="")
-    color: str | None | Field = Field()
-    opacity: float | Field = Field(default=1.0)
-    visible: bool | Field = Field(default=True)
-    tintcolor: str | None | Field = Field()
-    offsetx: float | Field = Field(default=0.0)
-    offsety: float | Field = Field(default=0.0)
-    parallaxx: float | Field = Field(default=1.0)
-    parallaxy: float | Field = Field(default=1.0)
-    draworder: str | Field = Field(default="topdown")
+    id: int | Any = ParsedField(default=0)
+    name: str | Any = ParsedField(default="")
+    color: str | None | Any = ParsedField()
+    opacity: float | Any = ParsedField(default=1.0)
+    visible: bool | Any = ParsedField(default=True)
+    tintcolor: str | None | Any = ParsedField()
+    offsetx: float | Any = ParsedField(default=0.0)
+    offsety: float | Any = ParsedField(default=0.0)
+    parallaxx: float | Any = ParsedField(default=1.0)
+    parallaxy: float | Any = ParsedField(default=1.0)
+    draworder: str | Any = ParsedField(default="topdown")
 
-    properties: Properties | None | Field = Field(xml_child=True)
-    objects: list[Object] | Field = Field(xml_child=True)
+    properties: Properties | None | Any = ParsedField(xml_child=True)
+    objects: list[Object] | Any = ParsedField(xml_child=True)
 
     def __repr__(self):
         return f"<ObjectGroup {self.objects}>"
@@ -371,20 +378,20 @@ class ObjectGroup(SpecializableMixin, LayerBase, tag="objectgroup", base=True, a
 class Object(SpecializableMixin, Entry, tag="object", attrib="type"):
     """A TMX object."""
 
-    id: int | Field = Field(default=0)
-    name: str | None | Field = Field()
-    type: str | None | Field = Field()
-    x: float | Field = Field()
-    y: float | Field = Field()
-    width: float | None | Field = Field()
-    height: float | None | Field = Field()
-    rotation: float | Field = Field(default=0.0)
-    gid: int | None | Field = Field()
-    visible: bool | Field = Field(default=True)
+    id: int | Any = ParsedField(default=0)
+    name: str | None | Any = ParsedField()
+    type: str | None | Any = ParsedField()
+    x: float | Any = ParsedField()
+    y: float | Any = ParsedField()
+    width: float | None | Any = ParsedField()
+    height: float | None | Any = ParsedField()
+    rotation: float | Any = ParsedField(default=0.0)
+    gid: int | None | Any = ParsedField()
+    visible: bool | Any = ParsedField(default=True)
 
-    properties: Properties | None | Field = Field(xml_child=True)
+    properties: Properties | None | Any = ParsedField(xml_child=True)
 
-    text: Text | None | Field = Field(xml_child=True)
+    text: Text | None | Any = ParsedField(xml_child=True)
 
     def __repr__(self):
         return f"<Object {self.name!r} (type {self.type})>"
@@ -406,7 +413,7 @@ class Object(SpecializableMixin, Entry, tag="object", attrib="type"):
         """Returns the tile associated with this object, if present."""
         if self.gid is None:
             raise TypeError("not a tile object")
-        return self.parent.map.tiles[self.gid]
+        return cast(Tileset, self.parent).map.tiles[self.gid]
 
 @BaseLoader.register
 class LayerData(Entry, tag="data"):
@@ -433,7 +440,7 @@ class LayerData(Entry, tag="data"):
     # TODO: Types beyond csv
 
     @classmethod
-    def _load(cls, data: Any, parent: Entry | None, ctx: LoaderContext) -> Tileset:
+    def _load(cls, data: Any, parent: Entry | None, ctx: LoaderContext) -> LayerData:
         self = super()._load(data, parent, ctx)
         # pylint: disable=no-member
         if isinstance(data, list):
@@ -446,14 +453,18 @@ class LayerData(Entry, tag="data"):
             )
         return self
 
-    def __setitem__(self, idx: tuple[int, int] | int, _value: int) -> None:
-        self.data[idx[1] * self.width + idx[0]] = _value
+    def __setitem__(self, idx: tuple[int, int], _value: int) -> None:
+        self.data[idx[1] * not_optional(self.width) + idx[0]] = _value
 
     def __iter__(self):
         return iter(self.data)
 
-    def __getitem__(self, idx: tuple[int, int] | int) -> int:
+    def __getitem__(self, idx: tuple[int, int]) -> int:
         try:
-            return self.data[idx[1] * self.width + idx[0]]
+            return self.data[idx[1] * not_optional(self.width) + idx[0]]
         except (TypeError, IndexError):
             raise TypeError("can only index layer data with 2 coordinates") from None
+
+if __name__ == "__main__":
+    tmx = BaseLoader().load("/home/gwitr/Dokumenty/OMORI-decrypted/maps/endless_highway.json")
+    print(tmx.layers)
