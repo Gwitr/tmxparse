@@ -464,7 +464,3 @@ class LayerData(Entry, tag="data"):
             return self.data[idx[1] * not_optional(self.width) + idx[0]]
         except (TypeError, IndexError):
             raise TypeError("can only index layer data with 2 coordinates") from None
-
-if __name__ == "__main__":
-    tmx = BaseLoader().load("/home/gwitr/Dokumenty/OMORI-decrypted/maps/endless_highway.json")
-    print(tmx.layers)
