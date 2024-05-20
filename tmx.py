@@ -10,7 +10,7 @@ from collections import UserDict
 import xml.etree.ElementTree as ET
 from typing import Generator, Any, Union, get_origin, get_args, cast, TypeVar
 
-from base import BaseLoader, SpecializableMixin, Entry, Field, CustomLoaderField, AliasField, ParsedField, LoaderContext, RemoteEntry
+from .base import BaseLoader, SpecializableMixin, Entry, Field, CustomLoaderField, AliasField, ParsedField, LoaderContext, RemoteEntry
 
 T = TypeVar("T")
 
