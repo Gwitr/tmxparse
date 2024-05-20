@@ -29,12 +29,13 @@ def not_optional(x: T | None) -> T:
     assert x is not None, "must not be None"
     return x
 
-class _SpecializableMixinBase:
-
-    # for mypy
-    @classmethod
-    def _load(cls, data: ET.Element | dict, parent: Entry | None, ctx: LoaderContext) -> Entry:
-        raise NotImplementedError
+if TYPE_CHECKING:
+    class _SpecializableMixinBase:
+        @classmethod
+        def _load(cls, data: ET.Element | dict, parent: Entry | None, ctx: LoaderContext) -> Entry:
+            raise NotImplementedError
+else:
+    _SpecializableMixinBase = object
 
 class SpecializableMixin(_SpecializableMixinBase):
     """Mixin that allows a type to be specialized at load time based on an XML attribute"""
@@ -180,7 +181,7 @@ class Field:
             optional = False
             if get_origin(annotation) in (Union, types.UnionType):
                 optional = True
-                annotation, = [i for i in get_args(annotation) if i is not None and not issubclass(i, Field)]
+                annotation, = [i for i in get_args(annotation) if i is not None and i is not type(None) and not issubclass(i, Field) and i is not Any]
             if get_origin(annotation) is list:
                 is_list = True
                 annotation = get_args(annotation)[0]
@@ -248,7 +249,7 @@ class ParsedField(Field):
 
         all_tags_xml = {}
         all_tags_json: dict[str, list[type[Entry]]] = {}
-        for k, v in ctx.loader.PARSERS.values():
+        for k, v in ctx.loader.PARSERS.items():
             if issubclass(v, loader_class):
                 all_tags_xml[k] = v
                 all_tags_json.setdefault(v.JSON_TYPE, []).append(v)
